@@ -1,0 +1,82 @@
+name: Tip dňa na Instagram
+
+on:
+  schedule:
+    # 6:10 UTC = 8:10 v lete, 7:10 v zime (slovenský čas)
+    - cron: "10 6 * * *"
+  workflow_dispatch:
+    inputs:
+      datum:
+        description: "Dátum tipu RRRR-MM-DD (prázdne = dnes)"
+        required: false
+      len_obrazok:
+        description: "Len vyrobiť obrázok na kontrolu, nezverejňovať"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency: instagram
+
+jobs:
+  tip:
+    runs-on: ubuntu-latest
+    env:
+      DATUM: ${{ github.event.inputs.datum }}
+      VYNUTIT: ${{ github.event.inputs.datum != '' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Inštalácia nástrojov
+        run: |
+          pip install playwright==1.48.0
+          python -m playwright install --with-deps chromium
+
+      - name: Vyrobiť obrázok z dnešného tipu
+        run: python publikuj.py priprav
+
+      - name: Obrázok na stiahnutie (kontrola)
+        if: hashFiles('obrazky/dnes.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: obrazok-tipu
+          path: obrazky/tip-*.jpg
+
+      - name: Uložiť obrázok do repozitára
+        id: ulozit
+        if: hashFiles('obrazky/dnes.json') != '' && github.event.inputs.len_obrazok != 'true'
+        run: |
+          git config user.name "erekon-bot"
+          git config user.email "erekon-bot@users.noreply.github.com"
+          git add obrazky/
+          git commit -m "Obrázok tipu ${DATUM:-$(TZ=Europe/Bratislava date +%F)}"
+          git push
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Zverejniť na Instagrame
+        if: steps.ulozit.outcome == 'success'
+        env:
+          IG_TOKEN: ${{ secrets.IG_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          COMMIT_SHA: ${{ steps.ulozit.outputs.sha }}
+        run: |
+          python publikuj.py zverejni
+          git add zverejnene.txt
+          git commit -m "Zverejnené ${DATUM:-$(TZ=Europe/Bratislava date +%F)}"
+          git push
+
+      - name: Predĺžiť platnosť tokenu (každý pondelok)
+        if: github.event_name == 'schedule' && always()
+        env:
+          IG_TOKEN: ${{ secrets.IG_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ "$(date +%u)" = "1" ]; then
+            python publikuj.py obnov-token | gh secret set IG_TOKEN --repo "$GITHUB_REPOSITORY"
+            echo "Token predĺžený o 60 dní."
+          fi
